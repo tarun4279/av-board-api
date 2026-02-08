@@ -152,34 +152,53 @@ export class UsersService {
     const add = this.normalizeTags(input.add ?? []);
     const remove = this.normalizeTags(input.remove ?? []);
 
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const exists = await tx.user.findUnique({ where: { id } });
-      if (!exists) throw new NotFoundException('user not found');
+    const updated = await this.prisma.$transaction(
+      async (tx) => {
+        const exists = await tx.user.findUnique({ where: { id } });
+        if (!exists) throw new NotFoundException('user not found');
 
-      for (const name of add) {
-        const tag = await tx.tag.upsert({
-          where: { name },
-          update: {},
-          create: { name },
-        });
-        await tx.userTag.upsert({
-          where: { userId_tagId: { userId: id, tagId: tag.id } },
-          update: {},
-          create: { userId: id, tagId: tag.id },
-        });
-      }
+        if (add.length > 0) {
+          await tx.tag.createMany({
+            data: add.map((name) => ({ name })),
+            skipDuplicates: true,
+          });
 
-      if (remove.length > 0) {
-        await tx.userTag.deleteMany({
-          where: { userId: id, tag: { name: { in: remove } } },
-        });
-      }
+          const addTags = await tx.tag.findMany({
+            where: { name: { in: add } },
+            select: { id: true },
+          });
 
-      return tx.user.findUniqueOrThrow({
-        where: { id },
-        include: { tags: { include: { tag: true } }, busySlots: true },
-      });
-    });
+          if (addTags.length > 0) {
+            await tx.userTag.createMany({
+              data: addTags.map((t) => ({ userId: id, tagId: t.id })),
+              skipDuplicates: true,
+            });
+          }
+        }
+
+        if (remove.length > 0) {
+          const removeTags = await tx.tag.findMany({
+            where: { name: { in: remove } },
+            select: { id: true },
+          });
+
+          const removeTagIds = removeTags.map((t) => t.id);
+          if (removeTagIds.length > 0) {
+            await tx.userTag.deleteMany({
+              where: { userId: id, tagId: { in: removeTagIds } },
+            });
+          }
+        }
+
+        return tx.user.findUniqueOrThrow({
+          where: { id },
+          include: { tags: { include: { tag: true } }, busySlots: true },
+        });
+      },
+      {
+        timeout: 20000,
+      },
+    );
 
     return this.toApiUser(updated);
   }
